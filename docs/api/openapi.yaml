@@ -1,0 +1,679 @@
+openapi: 3.1.0
+info:
+  title: АС распределения поездок курьеров кластера дарксторов
+  version: 1.0.0
+  summary: Синхронный API для приложения курьера (И-05), панели куратора (И-07) и рабочего места сети (И-08)
+  description: |
+    У системы нет собственного интерфейса: её вызывают смежные системы через API-шлюз.
+
+    **Аутентификация.** Система-клиент предъявляет сертификат (mTLS на API-шлюзе), пользователь — токен
+    сервера учётных записей сети (И-09). Из токена берутся роль (`COURIER`, `CURATOR`, `OPS_HEAD`,
+    `ANALYST`) и даркстор пользователя; принадлежность смены, связки и направления проверяется по БД
+    (NFR004). Запрос чужих данных — `403`.
+
+    **Идемпотентность.** Команды, которые меняют состояние, принимают заголовок `Idempotency-Key`.
+    Повтор с тем же ключом и тем же телом возвращает исходный результат, с другим телом — `409` (NFR006).
+
+    **Ошибки** — в формате Problem Details (RFC 9457) с машиночитаемым полем `code`.
+
+    **Время** — ISO 8601 с часовым поясом. Доли и пороги — в процентах от обещания.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: https://dispatch.cluster-1.example.internal/api/v1
+    description: Кластер дарксторов (через API-шлюз)
+security:
+  - clientCert: []
+    userToken: []
+tags:
+  - name: Приложение курьера
+    description: Интеграция И-05
+  - name: Панель куратора
+    description: Интеграция И-07, права ограничены даркстором куратора
+  - name: Рабочее место сети
+    description: Интеграция И-08
+
+paths:
+  /shifts/{shiftId}/deliveries:
+    post:
+      tags: [Приложение курьера]
+      operationId: markDelivered
+      summary: Отметка о вручении заказа; после последнего заказа поездки — выдача направления
+      description: |
+        Требования: FR041 (факт вручения), FR027 (направление по наименьшему прогнозу опозданий,
+        при равенстве — базовый даркстор), FR028 (соседний даркстор не рассматривается при подаче
+        больше порога), FR029 (не уложились в 2 с — базовый даркстор), FR014 (до конца смены меньше
+        одного обещания — базовый даркстор), NFR001 (не более 2 с).
+
+        Вручение, перевод заказа в `DELIVERED`, закрытие связки и запись направления выполняются одной
+        транзакцией. Если заказ не последний в поездке, `direction` равно `null`.
+
+        Роль: `COURIER`, только своя открытая смена.
+      parameters:
+        - $ref: '#/components/parameters/ShiftId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryMark'
+            example:
+              orderId: 1048576
+              deliveredAt: '2026-11-02T19:41:07+03:00'
+      responses:
+        '200':
+          description: Вручение зафиксировано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryResult'
+              examples:
+                neighbor:
+                  summary: Последний заказ поездки, направление на соседний даркстор
+                  value:
+                    orderId: 1048576
+                    lastInTrip: true
+                    direction:
+                      directionId: 7340032
+                      targetDarkstoreId: 2
+                      baseDarkstoreId: 1
+                      reason: LEAST_LATENESS
+                      issuedAt: '2026-11-02T19:41:07.412+03:00'
+                timeout:
+                  summary: Расчёт не уложился в бюджет, направление на базу
+                  value:
+                    orderId: 1048576
+                    lastInTrip: true
+                    direction:
+                      directionId: 7340033
+                      targetDarkstoreId: 1
+                      baseDarkstoreId: 1
+                      reason: BASE_TIMEOUT
+                      issuedAt: '2026-11-02T19:41:09.205+03:00'
+                notLast:
+                  summary: В поездке есть невручённые заказы
+                  value:
+                    orderId: 1048575
+                    lastInTrip: false
+                    direction: null
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: |
+            `ORDER_NOT_IN_ACTIVE_BUNDLE` — заказа нет в действующей связке смены (снят куратором или уже вручён);
+            `IDEMPOTENCY_KEY_REUSED` — ключ уже использован с другим телом запроса.
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/Problem'}
+
+  /shifts/{shiftId}/bundle:
+    get:
+      tags: [Приложение курьера]
+      operationId: getCurrentBundle
+      summary: Текущая связка курьера
+      description: |
+        Связка составляется при прибытии курьера на даркстор (FR032): готовые заказы одной подзоны
+        с учётом лимита, веса и срочности. Роль: `COURIER`, своя смена.
+      parameters:
+        - $ref: '#/components/parameters/ShiftId'
+      responses:
+        '200':
+          description: Действующая связка
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Bundle'}
+        '204':
+          description: Связки нет — курьер ещё не прибыл или нет готовых заказов
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /shifts/{shiftId}/departures:
+    post:
+      tags: [Приложение курьера]
+      operationId: confirmDeparture
+      summary: Подтверждение выезда перечнем отсканированных заказов
+      description: |
+        Выезд фиксируется, только если перечень сканов совпадает с составом связки (FR037).
+        Роль: `COURIER`, своя смена.
+      parameters:
+        - $ref: '#/components/parameters/ShiftId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bundleId, scannedOrderIds]
+              properties:
+                bundleId: {type: integer, format: int64}
+                scannedOrderIds:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items: {type: integer, format: int64}
+      responses:
+        '200':
+          description: Выезд зафиксирован
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bundleId, departedAt]
+                properties:
+                  bundleId: {type: integer, format: int64}
+                  departedAt: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: '`SCAN_MISMATCH` — перечень сканов не совпадает со связкой, выезд не зафиксирован'
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Problem'
+                  - type: object
+                    properties:
+                      missingOrderIds:
+                        description: Заказы связки, которых нет в сканах
+                        type: array
+                        items: {type: integer, format: int64}
+                      extraOrderIds:
+                        description: Отсканированные заказы не из этой связки
+                        type: array
+                        items: {type: integer, format: int64}
+              example:
+                type: https://dispatch.example.internal/problems/scan-mismatch
+                title: Перечень сканов не совпадает со связкой
+                status: 409
+                code: SCAN_MISMATCH
+                missingOrderIds: [1048577]
+                extraOrderIds: []
+
+  /shifts/{shiftId}/pause-requests:
+    post:
+      tags: [Приложение курьера]
+      operationId: requestPause
+      summary: Запрос паузы
+      description: |
+        Пауза включается после вручения последнего заказа поездки; до её окончания направления не
+        выдаются (FR016). Отказаться от направления нельзя — пауза заменяет отказ. Роль: `COURIER`.
+      parameters:
+        - $ref: '#/components/parameters/ShiftId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [durationSec]
+              properties:
+                durationSec: {type: integer, minimum: 60, maximum: 3600}
+      responses:
+        '202':
+          description: Пауза принята и начнётся после текущей поездки
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [startsAfterTrip]
+                properties:
+                  startsAfterTrip: {type: boolean}
+                  startedAt:
+                    type: [string, 'null']
+                    format: date-time
+                    description: Заполнено, если курьер уже без заказов и пауза началась сразу
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409':
+          description: '`PAUSE_ALREADY_REQUESTED` — пауза уже запрошена или идёт'
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/Problem'}
+
+  /shifts/{shiftId}/locations:
+    post:
+      tags: [Приложение курьера]
+      operationId: sendLocations
+      summary: Пакет геопозиций курьера
+      description: |
+        Геопозиция передаётся раз в 10 с и принимается только во время смены (FR018, NFR003).
+        Ключ точки — (смена, время на устройстве): повторно отправленная точка не задваивается.
+        Вход в геозону даркстора фиксирует прибытие (FR019). Роль: `COURIER`.
+      parameters:
+        - $ref: '#/components/parameters/ShiftId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [points]
+              properties:
+                points:
+                  type: array
+                  minItems: 1
+                  maxItems: 360
+                  items: {$ref: '#/components/schemas/GeoPoint'}
+      responses:
+        '202':
+          description: Точки приняты
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, duplicates]
+                properties:
+                  accepted: {type: integer}
+                  duplicates: {type: integer, description: Точки, которые уже были приняты ранее}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409':
+          description: '`SHIFT_CLOSED` — смена закрыта, точки не сохраняются (NFR003)'
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/Problem'}
+
+  /darkstores/{darkstoreId}/bundles/{bundleId}/removals:
+    post:
+      tags: [Панель куратора]
+      operationId: removeOrderFromBundle
+      summary: Снять заказ со связки
+      description: |
+        Заказ возвращается в пул с прежним крайним сроком (FR038). Назначить заказ курьеру куратор
+        не может. Роль: `CURATOR` своего даркстора.
+      parameters:
+        - $ref: '#/components/parameters/DarkstoreId'
+        - name: bundleId
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, reason]
+              properties:
+                orderId: {type: integer, format: int64}
+                reason: {type: string, maxLength: 500}
+      responses:
+        '200':
+          description: Заказ снят и вернулся в пул
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: '`BUNDLE_DEPARTED` — связка уже в доставке, снять заказ нельзя'
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/Problem'}
+
+  /darkstores/{darkstoreId}/orders/{orderId}/reassembly:
+    post:
+      tags: [Панель куратора]
+      operationId: sendToReassembly
+      summary: Исключить повреждённый заказ и вернуть на пересборку
+      description: Заказ убирается из пула, WMS получает событие о пересборке (FR006). Роль `CURATOR` своего даркстора.
+      parameters:
+        - $ref: '#/components/parameters/DarkstoreId'
+        - name: orderId
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string, maxLength: 500}
+      responses:
+        '202':
+          description: Заказ исключён, событие для WMS сохранено и будет отправлено
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /darkstores/{darkstoreId}/couriers/{courierId}/order-limit:
+    put:
+      tags: [Панель куратора]
+      operationId: setCourierOrderLimit
+      summary: Установить личный лимит заказов курьера
+      description: Лимит учитывается при составлении следующей связки (FR015). Роль `CURATOR` даркстора, где курьер на смене.
+      parameters:
+        - $ref: '#/components/parameters/DarkstoreId'
+        - name: courierId
+          in: path
+          required: true
+          schema: {type: integer, format: int64}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderLimit]
+              properties:
+                orderLimit: {type: integer, minimum: 1, maximum: 10}
+      responses:
+        '204':
+          description: Лимит установлен
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /darkstores/{darkstoreId}/decision-log:
+    get:
+      tags: [Панель куратора, Рабочее место сети]
+      operationId: getDecisionLog
+      summary: Журнал решений по направлениям
+      description: |
+        Для каждого направления — рассмотренные дарксторы, их прогноз опозданий и выбранный вариант
+        (FR043, FR044). Куратор видит только свой даркстор, роли сети — любой даркстор кластера.
+        Журнал хранится не менее 90 дней (NFR008).
+      parameters:
+        - $ref: '#/components/parameters/DarkstoreId'
+        - name: from
+          in: query
+          required: true
+          schema: {type: string, format: date-time}
+        - name: to
+          in: query
+          required: true
+          schema: {type: string, format: date-time}
+          description: Не позже чем через 7 суток после `from`
+        - name: cursor
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+      responses:
+        '200':
+          description: Страница журнала
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/DecisionLogEntry'}
+                  nextCursor: {type: [string, 'null']}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
+  /distribution-parameters/current:
+    get:
+      tags: [Рабочее место сети]
+      operationId: getCurrentParameters
+      summary: Действующие пороги распределения
+      responses:
+        '200':
+          description: Действующая версия порогов
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DistributionParameters'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /distribution-parameters:
+    post:
+      tags: [Рабочее место сети]
+      operationId: changeParameters
+      summary: Изменить пороги распределения
+      description: |
+        Создаётся новая версия порогов; она действует со следующего пересчёта прогноза (FR040).
+        Прежние версии сохраняются: витрина сравнивает показатели до и после изменения.
+        Роль: `OPS_HEAD`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DistributionParametersInput'}
+      responses:
+        '201':
+          description: Новая версия создана
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DistributionParameters'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
+webhooks:
+  directionChanged:
+    post:
+      tags: [Приложение курьера]
+      operationId: onDirectionChanged
+      summary: Смена направления в пути — уведомление серверу приложения курьера
+      description: |
+        Отправляется, когда новый вариант уменьшает прогноз опозданий хотя бы на один заказ; не чаще
+        одного раза за возврат (FR030, ADR-002). При ошибке — до трёх повторов с экспоненциальной
+        задержкой с тем же `eventId`; после трёх неудач смена отменяется, действует исходное
+        направление. Сервер приложения должен отвечать `2xx` и отсеивать повторы по `eventId`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventId, shiftId, direction, previousTargetDarkstoreId]
+              properties:
+                eventId: {type: string, format: uuid}
+                shiftId: {type: integer, format: int64}
+                previousTargetDarkstoreId: {type: integer, format: int64}
+                direction: {$ref: '#/components/schemas/Direction'}
+      responses:
+        '202':
+          description: Уведомление принято
+
+components:
+  securitySchemes:
+    clientCert:
+      type: mutualTLS
+      description: Сертификат системы-клиента, проверяется на API-шлюзе
+    userToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Токен сервера учётных записей сети; содержит идентификатор пользователя, роль и даркстор
+
+  parameters:
+    ShiftId:
+      name: shiftId
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    DarkstoreId:
+      name: darkstoreId
+      in: path
+      required: true
+      schema: {type: integer, format: int64}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID команды, генерируется клиентом один раз и повторяется при повторной отправке
+      schema: {type: string, format: uuid}
+
+  responses:
+    BadRequest:
+      description: Тело или параметры запроса не прошли проверку (`VALIDATION_FAILED`)
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Unauthorized:
+      description: Нет токена, токен просрочен или подпись не проверена
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Forbidden:
+      description: Роль не допускает операцию или объект принадлежит чужому даркстору или чужой смене (NFR004)
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    NotFound:
+      description: Смена, связка, заказ или даркстор не найдены
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+
+  schemas:
+    DeliveryMark:
+      type: object
+      required: [orderId, deliveredAt]
+      properties:
+        orderId: {type: integer, format: int64}
+        deliveredAt:
+          type: string
+          format: date-time
+          description: Время вручения на устройстве курьера
+
+    DeliveryResult:
+      type: object
+      required: [orderId, lastInTrip, direction]
+      properties:
+        orderId: {type: integer, format: int64}
+        lastInTrip:
+          type: boolean
+          description: Заказ был последним невручённым в поездке
+        direction:
+          oneOf:
+            - $ref: '#/components/schemas/Direction'
+            - type: 'null'
+
+    Direction:
+      type: object
+      required: [directionId, targetDarkstoreId, baseDarkstoreId, reason, issuedAt]
+      properties:
+        directionId: {type: integer, format: int64}
+        targetDarkstoreId: {type: integer, format: int64}
+        baseDarkstoreId: {type: integer, format: int64}
+        reason:
+          type: string
+          enum: [LEAST_LATENESS, TIE_BASE, BASE_TIMEOUT, BASE_SHIFT_ENDING, CHANGED_EN_ROUTE]
+          description: |
+            `LEAST_LATENESS` — даркстор с наименьшим прогнозом опозданий (FR027);
+            `TIE_BASE` — прогнозы равны, выбран базовый (FR027);
+            `BASE_TIMEOUT` — расчёт не уложился в бюджет (FR029);
+            `BASE_SHIFT_ENDING` — до конца смены меньше одного обещания (FR014);
+            `CHANGED_EN_ROUTE` — направление изменено в пути (FR030).
+        issuedAt: {type: string, format: date-time}
+
+    Bundle:
+      type: object
+      required: [bundleId, darkstoreId, subzoneId, status, orders]
+      properties:
+        bundleId: {type: integer, format: int64}
+        darkstoreId: {type: integer, format: int64}
+        subzoneId: {type: integer, format: int64}
+        status:
+          type: string
+          enum: [FORMED, DEPARTED]
+        holdUntil:
+          type: [string, 'null']
+          format: date-time
+          description: Выезд задержан до этого времени, чтобы добрать заказ той же подзоны (FR035)
+        orders:
+          type: array
+          description: Заказы в порядке срочности
+          items:
+            type: object
+            required: [orderId, deadlineAt, weightKg]
+            properties:
+              orderId: {type: integer, format: int64}
+              deadlineAt: {type: string, format: date-time}
+              weightKg: {type: number}
+
+    GeoPoint:
+      type: object
+      required: [lat, lon, deviceTime]
+      properties:
+        lat: {type: number, minimum: -90, maximum: 90}
+        lon: {type: number, minimum: -180, maximum: 180}
+        deviceTime: {type: string, format: date-time}
+
+    DecisionLogEntry:
+      type: object
+      required: [decisionLogId, directionId, shiftId, loggedAt, parameterVersion, options]
+      properties:
+        decisionLogId: {type: integer, format: int64}
+        directionId: {type: integer, format: int64}
+        shiftId: {type: integer, format: int64}
+        loggedAt: {type: string, format: date-time}
+        parameterVersion: {type: integer, format: int64}
+        reason: {type: string}
+        options:
+          type: array
+          items:
+            type: object
+            required: [darkstoreId, forecastLateQnt, supplySec, chosen]
+            properties:
+              darkstoreId: {type: integer, format: int64}
+              forecastLateQnt: {type: integer, description: Прогноз числа опозданий при выборе этого варианта}
+              supplySec: {type: integer, description: Подача курьера к даркстору}
+              chosen: {type: boolean}
+
+    DistributionParametersInput:
+      type: object
+      required: [supplyMaxPct, overduePct, holdMaxPct, forecastShiftPct]
+      properties:
+        supplyMaxPct:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Соседний даркстор не рассматривается при подаче больше этой доли обещания (FR028), по умолчанию 40
+        overduePct:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Заказ, просроченный больше чем на эту долю, включается в ближайшую связку (FR033), по умолчанию 25
+        holdMaxPct:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Максимальная задержка выезда ради заказа той же подзоны (FR035), по умолчанию 10
+        forecastShiftPct:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Сдвиг прогноза вручения, при котором он отправляется в систему заказов (FR026), по умолчанию 10
+
+    DistributionParameters:
+      allOf:
+        - $ref: '#/components/schemas/DistributionParametersInput'
+        - type: object
+          required: [parameterId, validFrom]
+          properties:
+            parameterId: {type: integer, format: int64}
+            validFrom: {type: string, format: date-time}
+            changedBy: {type: string}
+
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+        code:
+          type: string
+          description: Машиночитаемый код ошибки
+          examples: [ORDER_NOT_IN_ACTIVE_BUNDLE, IDEMPOTENCY_KEY_REUSED, SCAN_MISMATCH, SHIFT_CLOSED]

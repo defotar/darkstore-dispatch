@@ -1,0 +1,303 @@
+asyncapi: 3.0.0
+info:
+  title: АС распределения поездок — события смежных систем
+  version: 1.0.0
+  description: |
+    События через RabbitMQ (ADR-009): входящие от системы заказов (И-01), WMS (И-02), справочника
+    подзон (И-03) и кадровой системы (И-04); исходящие — в систему заказов и WMS.
+
+    **Топология.** Каждая система-источник публикует в свой topic-обменник (`orders`, `wms`,
+    `directory`, `hr`) с ключом маршрутизации из адреса канала. Система читает кворумные очереди
+    `dispatch.<ключ>` из прикладного сегмента — подключается к брокеру сама. Исходящие события
+    публикуются в обменник `dispatch`.
+
+    **Надёжность.**
+    - Подтверждение (`ack`) — только после фиксации транзакции обработки.
+    - Повтор отсеивается по уникальной паре `(source, eventId)` в таблице обработанных событий
+      (NFR006): обработка «ровно один раз» поверх доставки «хотя бы один раз».
+    - Событие с даркстором вне кластера не обрабатывается, записывается в журнал отклонённых
+      с причиной и подтверждается (FR011).
+    - Техническая ошибка — `nack`; 5 повторов с нарастающей задержкой, затем очередь
+      `dispatch.<ключ>.dlq` и оповещение в мониторинге.
+    - Исходящие события сохраняются в реестре Spring Modulith в той же транзакции, что и изменение
+      данных (outbox), и досылаются после сбоя.
+
+    **Заголовки** у всех сообщений одинаковые: `eventId`, `source`, `occurredAt`, `schemaVersion`.
+    Новые необязательные поля добавляются без смены версии; удаление или смена смысла поля —
+    новая `schemaVersion`, старую система принимает не меньше одного релиза.
+  license:
+    name: MIT
+    identifier: MIT
+
+defaultContentType: application/json
+
+servers:
+  cluster-broker:
+    host: rabbitmq.cluster-1.example.internal:5671
+    protocol: amqps
+    description: Брокер в периметре АС, три узла с кворумными очередями; доступ по сертификату системы
+
+channels:
+  orderPlaced:
+    address: orders.order-placed
+    messages:
+      orderPlaced: {$ref: '#/components/messages/OrderPlaced'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: orders, type: topic, durable: true}}
+  orderCancelled:
+    address: orders.order-cancelled
+    messages:
+      orderCancelled: {$ref: '#/components/messages/OrderCancelled'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: orders, type: topic, durable: true}}
+  assemblyStarted:
+    address: wms.assembly-started
+    messages:
+      assemblyStarted: {$ref: '#/components/messages/AssemblyStarted'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: wms, type: topic, durable: true}}
+  readyTimeUpdated:
+    address: wms.ready-time-updated
+    messages:
+      readyTimeUpdated: {$ref: '#/components/messages/ReadyTimeUpdated'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: wms, type: topic, durable: true}}
+  orderAssembled:
+    address: wms.order-assembled
+    messages:
+      orderAssembled: {$ref: '#/components/messages/OrderAssembled'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: wms, type: topic, durable: true}}
+  subzonesUpdated:
+    address: directory.subzones-updated
+    messages:
+      subzonesUpdated: {$ref: '#/components/messages/SubzonesUpdated'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: directory, type: topic, durable: true}}
+  shiftAdmitted:
+    address: hr.shift-admitted
+    messages:
+      shiftAdmitted: {$ref: '#/components/messages/ShiftAdmitted'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: hr, type: topic, durable: true}}
+  shiftEnded:
+    address: hr.shift-ended
+    messages:
+      shiftEnded: {$ref: '#/components/messages/ShiftEnded'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: hr, type: topic, durable: true}}
+  deliveryForecast:
+    address: dispatch.delivery-forecast
+    messages:
+      deliveryForecast: {$ref: '#/components/messages/DeliveryForecast'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: dispatch, type: topic, durable: true}}
+  reassemblyRequested:
+    address: dispatch.reassembly-requested
+    messages:
+      reassemblyRequested: {$ref: '#/components/messages/ReassemblyRequested'}
+    bindings:
+      amqp: {is: routingKey, exchange: {name: dispatch, type: topic, durable: true}}
+
+operations:
+  receiveOrderPlaced:
+    action: receive
+    channel: {$ref: '#/channels/orderPlaced'}
+    summary: Заказ оформлен — обещание и срочность (FR007)
+    bindings: {amqp: {ack: true}}
+  receiveOrderCancelled:
+    action: receive
+    channel: {$ref: '#/channels/orderCancelled'}
+    summary: Отмена — заказ исключается из прогноза, пула и связки, если доставка не начата (FR005)
+    bindings: {amqp: {ack: true}}
+  receiveAssemblyStarted:
+    action: receive
+    channel: {$ref: '#/channels/assemblyStarted'}
+    summary: Сборка начата — заказ учитывается в прогнозе с ожидаемым временем готовности (FR001)
+    bindings: {amqp: {ack: true}}
+  receiveReadyTimeUpdated:
+    action: receive
+    channel: {$ref: '#/channels/readyTimeUpdated'}
+    summary: Новое ожидаемое время готовности заменяет прежнее (FR002)
+    bindings: {amqp: {ack: true}}
+  receiveOrderAssembled:
+    action: receive
+    channel: {$ref: '#/channels/orderAssembled'}
+    summary: Заказ собран — переходит в пул готовых (FR004)
+    bindings: {amqp: {ack: true}}
+  receiveSubzonesUpdated:
+    action: receive
+    channel: {$ref: '#/channels/subzonesUpdated'}
+    summary: Состав кластера, геозоны, подзоны и соседство (FR010, NFR007)
+    bindings: {amqp: {ack: true}}
+  receiveShiftAdmitted:
+    action: receive
+    channel: {$ref: '#/channels/shiftAdmitted'}
+    summary: Курьер допущен к смене (FR012)
+    bindings: {amqp: {ack: true}}
+  receiveShiftEnded:
+    action: receive
+    channel: {$ref: '#/channels/shiftEnded'}
+    summary: Смена окончена — направления больше не выдаются (FR013)
+    bindings: {amqp: {ack: true}}
+  sendDeliveryForecast:
+    action: send
+    channel: {$ref: '#/channels/deliveryForecast'}
+    summary: Прогноз вручения при угрозе опоздания или сдвиге больше порога, не чаще раза в 2 мин на заказ (FR026)
+  sendReassemblyRequested:
+    action: send
+    channel: {$ref: '#/channels/reassemblyRequested'}
+    summary: Повреждённый заказ возвращается на пересборку (FR006)
+
+components:
+  messages:
+    OrderPlaced:
+      name: OrderPlaced
+      title: Заказ оформлен
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [orderId, darkstoreId, subzoneId, placedAt, deadlineAt]
+        properties:
+          orderId: {type: integer, format: int64}
+          darkstoreId: {type: integer, format: int64}
+          subzoneId: {type: integer, format: int64}
+          placedAt: {type: string, format: date-time}
+          deadlineAt: {type: string, format: date-time}
+        description: Адрес и состав заказа не передаются — минимизация данных
+    OrderCancelled:
+      name: OrderCancelled
+      title: Заказ отменён
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [orderId, darkstoreId, cancelledAt]
+        properties:
+          orderId: {type: integer, format: int64}
+          darkstoreId: {type: integer, format: int64}
+          cancelledAt: {type: string, format: date-time}
+    AssemblyStarted:
+      name: AssemblyStarted
+      title: Сборка начата
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [orderId, darkstoreId, expectedReadyAt]
+        properties:
+          orderId: {type: integer, format: int64}
+          darkstoreId: {type: integer, format: int64}
+          expectedReadyAt: {type: string, format: date-time}
+    ReadyTimeUpdated:
+      name: ReadyTimeUpdated
+      title: Ожидаемое время готовности изменилось
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [orderId, darkstoreId, expectedReadyAt]
+        properties:
+          orderId: {type: integer, format: int64}
+          darkstoreId: {type: integer, format: int64}
+          expectedReadyAt: {type: string, format: date-time}
+    OrderAssembled:
+      name: OrderAssembled
+      title: Заказ собран
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [orderId, darkstoreId, assembledAt, weightKg]
+        properties:
+          orderId: {type: integer, format: int64}
+          darkstoreId: {type: integer, format: int64}
+          assembledAt: {type: string, format: date-time}
+          weightKg: {type: number, minimum: 0}
+    SubzonesUpdated:
+      name: SubzonesUpdated
+      title: Справочник подзон обновлён
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [clusterId, directoryVersion, darkstores]
+        properties:
+          clusterId: {type: integer, format: int64}
+          directoryVersion: {type: integer, description: Полный снимок; версия меньше текущей игнорируется}
+          darkstores:
+            type: array
+            items:
+              type: object
+              required: [darkstoreId, code, geozoneWkt, subzones]
+              properties:
+                darkstoreId: {type: integer, format: int64}
+                code: {type: string}
+                geozoneWkt: {type: string, description: Многоугольник геозоны в WKT}
+                subzones:
+                  type: array
+                  items:
+                    type: object
+                    required: [subzoneId, code, neighborSubzoneIds]
+                    properties:
+                      subzoneId: {type: integer, format: int64}
+                      code: {type: string}
+                      neighborSubzoneIds:
+                        type: array
+                        items: {type: integer, format: int64}
+    ShiftAdmitted:
+      name: ShiftAdmitted
+      title: Курьер допущен к смене
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [shiftId, courierId, baseDarkstoreId, startAt, endAt, transportType]
+        properties:
+          shiftId: {type: integer, format: int64}
+          courierId: {type: integer, format: int64}
+          baseDarkstoreId: {type: integer, format: int64}
+          startAt: {type: string, format: date-time}
+          endAt: {type: string, format: date-time}
+          transportType: {type: string, enum: [FOOT, BIKE, CAR]}
+    ShiftEnded:
+      name: ShiftEnded
+      title: Смена окончена
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [shiftId, endedAt]
+        properties:
+          shiftId: {type: integer, format: int64}
+          endedAt: {type: string, format: date-time}
+    DeliveryForecast:
+      name: DeliveryForecast
+      title: Прогноз вручения
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [orderId, forecastDeliveryAt, atRisk]
+        properties:
+          orderId: {type: integer, format: int64}
+          forecastDeliveryAt: {type: string, format: date-time}
+          atRisk: {type: boolean, description: Прогноз вручения позже крайнего срока (FR008)}
+    ReassemblyRequested:
+      name: ReassemblyRequested
+      title: Заказ возвращён на пересборку
+      headers: {$ref: '#/components/schemas/Headers'}
+      payload:
+        type: object
+        required: [orderId, darkstoreId, requestedAt]
+        properties:
+          orderId: {type: integer, format: int64}
+          darkstoreId: {type: integer, format: int64}
+          requestedAt: {type: string, format: date-time}
+          reason: {type: string}
+
+  schemas:
+    Headers:
+      type: object
+      required: [eventId, source, occurredAt, schemaVersion]
+      properties:
+        eventId:
+          type: string
+          description: Уникален в пределах источника; вместе с source — ключ отсева повторов
+        source:
+          type: string
+          enum: [OMS, WMS, DIRECTORY, HR, DISPATCH]
+        occurredAt: {type: string, format: date-time}
+        schemaVersion: {type: integer, minimum: 1}

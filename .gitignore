@@ -1,0 +1,4 @@
+db/pgdata/
+db/results/fr027_log*
+.DS_Store
+*.bkp

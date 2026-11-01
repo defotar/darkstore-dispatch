@@ -1,0 +1,97 @@
+{
+ "Q1": {
+  "ms": 54.099,
+  "scans": [
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan"
+  ]
+ },
+ "Q2": {
+  "ms": 18.611,
+  "scans": [
+   "Seq Scan",
+   "Seq Scan"
+  ]
+ },
+ "Q3": {
+  "ms": 9.919,
+  "scans": [
+   "Seq Scan"
+  ]
+ },
+ "Q4": {
+  "ms": 6.129,
+  "scans": [
+   "Seq Scan"
+  ]
+ },
+ "Q5": {
+  "ms": 0.504,
+  "scans": [
+   "Seq Scan",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan shift_open_uq"
+  ]
+ },
+ "Q5T": {
+  "ms": 3223.36,
+  "scans": [
+   "Function Scan",
+   "Seq Scan",
+   "Seq Scan"
+  ]
+ },
+ "Q6": {
+  "ms": 16.922,
+  "scans": [
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Index Scan decisionoption_decision_log_id_darkstore_id_key"
+  ]
+ },
+ "Q7": {
+  "ms": 19.064,
+  "scans": [
+   "Seq Scan",
+   "Seq Scan"
+  ]
+ },
+ "Q7J": {
+  "ms": 44.772,
+  "scans": [
+   "Seq Scan",
+   "Seq Scan",
+   "Index Scan deliveryorder_pkey"
+  ]
+ },
+ "Q8": {
+  "ms": 121.444,
+  "scans": [
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan",
+   "Seq Scan"
+  ]
+ },
+ "Q9": {
+  "ms": 0.004,
+  "scans": [
+   "Index Only Scan processedevent_source_code_event_code_key"
+  ]
+ }
+}

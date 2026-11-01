@@ -1,0 +1,110 @@
+{
+ "Q1": {
+  "ms": 0.134,
+  "scans": [
+   "Seq Scan",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan deliveryorder_active_ix"
+  ]
+ },
+ "Q2": {
+  "ms": 0.022,
+  "scans": [
+   "Seq Scan",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan deliveryorder_active_ix"
+  ]
+ },
+ "Q3": {
+  "ms": 0.003,
+  "scans": [
+   "Index Scan bundleitem_bundle_ix"
+  ]
+ },
+ "Q4": {
+  "ms": 0.005,
+  "scans": [
+   "Index Scan arrival_darkstore_ix"
+  ]
+ },
+ "Q5": {
+  "ms": 0.509,
+  "scans": [
+   "Seq Scan",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan shift_open_uq"
+  ]
+ },
+ "Q5T": {
+  "ms": 0.365,
+  "scans": [
+   "Function Scan",
+   "Index Scan trackpoint_v2_20261025_pkey",
+   "Index Scan trackpoint_v2_20261024_pkey"
+  ]
+ },
+ "Q6": {
+  "ms": 1.333,
+  "scans": [
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan direction_target_ix",
+   "Index Scan decisionlog_direction_ix",
+   "Index Scan decisionoption_decision_log_id_darkstore_id_key"
+  ]
+ },
+ "Q7": {
+  "ms": 18.386,
+  "scans": [
+   "Seq Scan",
+   "Seq Scan"
+  ]
+ },
+ "Q7J": {
+  "ms": 42.914,
+  "scans": [
+   "Seq Scan",
+   "Seq Scan",
+   "Index Scan deliveryorder_pkey"
+  ]
+ },
+ "Q8": {
+  "ms": 15.612,
+  "scans": [
+   "Index Scan trackpoint_v2_20261011_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261012_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261013_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261014_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261015_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261016_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261017_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261018_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261019_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261020_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261021_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261022_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261023_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261024_pkey",
+   "Bitmap Heap Scan",
+   "Bitmap Index Scan trackpoint_v2_20261025_pkey"
+  ]
+ },
+ "Q9": {
+  "ms": 0.003,
+  "scans": [
+   "Index Only Scan processedevent_source_code_event_code_key"
+  ]
+ }
+}

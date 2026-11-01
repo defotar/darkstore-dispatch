@@ -1,0 +1,10 @@
+              t               |   n    |                h                 
+------------------------------+--------+----------------------------------
+ DecisionLog                  | 195637 | 2c7c8a62f9d429836cb1cbfc6c706b00
+ DecisionOption               | 586911 | e0abb632d18ea31f705c24a5641ed93b
+ DeliveryOrder                | 405000 | a9a703c6333ee5899fb3334121763eba
+ ForecastAccuracy             |    267 | 7b00dd0e4dfd4f881f287c9cc5910344
+ SubzoneNeighborLink          |     54 | df900cf922de0adc3346c93c76e27606
+ Неподтверждённые ограничения |      0 | 
+(6 rows)
+

@@ -1,0 +1,6 @@
+BEGIN;
+DELETE FROM d05.Lateness WHERE order_id <= 4500;
+DELETE FROM d04.OrderForecast WHERE order_id <= 4500;
+DELETE FROM d04.BundleItem WHERE order_id <= 4500;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) DELETE FROM d01.DeliveryOrder WHERE order_id <= 4500;
+ROLLBACK;
